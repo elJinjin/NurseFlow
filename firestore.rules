@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isDocOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidPatient(data) {
+      return data.id is string &&
+             data.fullName is string && data.fullName.size() > 0 && data.fullName.size() < 100 &&
+             data.dateOfBirth is string &&
+             data.gender in ['Male', 'Female', 'Other'] &&
+             (!('room' in data) || data.room is string);
+    }
+
+    match /patients/{patientId} {
+      // For a nurse station, authenticated nurses can read and write patient data
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidPatient(request.resource.data);
+      allow update: if isAuthenticated() && isValidPatient(request.resource.data);
+      allow delete: if false; // Only admins should delete, but for this prototype we disable it
+
+      match /medicationLogs/{logId} {
+        allow read, create: if isAuthenticated();
+      }
+
+      match /scheduledMedications/{scheduleId} {
+        allow read, write: if isAuthenticated();
+      }
+
+      match /vitals/{vitalId} {
+        allow read, create: if isAuthenticated();
+      }
+
+      match /shiftNotes/{noteId} {
+        allow read, create: if isAuthenticated();
+        allow update: if isAuthenticated() && request.auth.uid == resource.data.recordedBy;
+      }
+    }
+    
+    match /users/{userId} {
+      allow read, write: if isDocOwner(userId);
+    }
+  }
+}

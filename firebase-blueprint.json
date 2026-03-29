@@ -1,0 +1,101 @@
+{
+  "entities": {
+    "Patient": {
+      "title": "Patient",
+      "description": "Patient demographic and medical information.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique patient ID (often from QR code)." },
+        "fullName": { "type": "string", "description": "Full name of the patient." },
+        "dateOfBirth": { "type": "string", "format": "date", "description": "Patient's date of birth." },
+        "gender": { "type": "string", "enum": ["Male", "Female", "Other"], "description": "Patient's gender." },
+        "bloodType": { "type": "string", "enum": ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"], "description": "Patient's blood type." },
+        "allergies": { "type": "array", "items": { "type": "string" }, "description": "List of allergies." },
+        "chronicConditions": { "type": "array", "items": { "type": "string" }, "description": "List of chronic conditions." },
+        "currentMedications": { "type": "array", "items": { "type": "string" }, "description": "List of current medications." },
+        "room": { "type": "string", "description": "Patient's room or location." },
+        "emergencyContact": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "relationship": { "type": "string" },
+            "phone": { "type": "string" }
+          }
+        },
+        "lastVitals": {
+          "type": "object",
+          "properties": {
+            "bloodPressure": { "type": "string", "description": "e.g., 120/80" },
+            "heartRate": { "type": "number", "description": "bpm" },
+            "temperature": { "type": "number", "description": "Celsius" },
+            "spo2": { "type": "number", "description": "Oxygen saturation %" },
+            "recordedAt": { "type": "string", "format": "date-time" }
+          }
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "fullName", "dateOfBirth", "gender"]
+    },
+    "MedicationLog": {
+      "title": "Medication Log",
+      "description": "Record of a medication administration.",
+      "type": "object",
+      "properties": {
+        "medicationName": { "type": "string" },
+        "dosage": { "type": "string" },
+        "route": { "type": "string" },
+        "administeredAt": { "type": "string", "format": "date-time" },
+        "administeredBy": { "type": "string", "description": "Nurse UID" },
+        "administeredByName": { "type": "string" }
+      },
+      "required": ["medicationName", "dosage", "route", "administeredAt", "administeredBy"]
+    },
+    "ScheduledMedication": {
+      "title": "Scheduled Medication",
+      "description": "Medication that needs to be administered regularly.",
+      "type": "object",
+      "properties": {
+        "medicationName": { "type": "string" },
+        "dosage": { "type": "string" },
+        "route": { "type": "string" },
+        "frequency": { "type": "string", "description": "e.g., Every 8 hours" },
+        "nextDue": { "type": "string", "format": "date-time" }
+      },
+      "required": ["medicationName", "dosage", "route", "frequency", "nextDue"]
+    },
+    "ShiftNote": {
+      "title": "Shift Note",
+      "description": "A note added by a nurse during their shift regarding the patient.",
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "recordedBy": { "type": "string", "description": "Nurse UID" },
+        "recordedByName": { "type": "string" },
+        "recordedAt": { "type": "string", "format": "date-time" },
+        "editedBy": { "type": "string", "description": "Nurse UID" },
+        "editedByName": { "type": "string" },
+        "editedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["text", "recordedBy", "recordedByName", "recordedAt"]
+    }
+  },
+  "firestore": {
+    "/patients/{patientId}": {
+      "schema": "Patient",
+      "description": "Collection of patient records."
+    },
+    "/patients/{patientId}/medicationLogs/{logId}": {
+      "schema": "MedicationLog",
+      "description": "History of medications given to the patient."
+    },
+    "/patients/{patientId}/scheduledMedications/{scheduleId}": {
+      "schema": "ScheduledMedication",
+      "description": "Medications scheduled for the patient."
+    },
+    "/patients/{patientId}/shiftNotes/{noteId}": {
+      "schema": "ShiftNote",
+      "description": "Shift notes for the patient."
+    }
+  }
+}
