@@ -4,7 +4,7 @@
  */
 
 import React, { Component, useState, useEffect, useRef, useMemo } from 'react';
-import { GoogleGenAI, Type } from "@google/genai";
+import { Auth } from './Auth';
 import { 
   QrCode, 
   User, 
@@ -34,12 +34,10 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Html5Qrcode } from 'html5-qrcode';
-import { 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  onAuthStateChanged, 
-  signOut, 
-  User as FirebaseUser 
+import {
+  signOut,
+  onAuthStateChanged,
+  User as FirebaseUser
 } from 'firebase/auth';
 import { 
   doc, 
@@ -341,9 +339,6 @@ function SmartNurseStation() {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setLoading(false);
-      if (u) {
-        testConnection();
-      }
     });
     return () => unsubscribe();
   }, []);
@@ -359,25 +354,6 @@ function SmartNurseStation() {
     } catch (err) {
       console.error("Error updating status:", err);
       setError("Failed to update patient status.");
-    }
-  };
-
-  const testConnection = async () => {
-    try {
-      await getDocFromServer(doc(db, 'test', 'connection'));
-    } catch (err) {
-      if (err instanceof Error && (err.message.includes('the client is offline') || err.message.includes('unavailable'))) {
-        setError("Firestore is offline or unavailable. Please check your internet connection.");
-      }
-    }
-  };
-
-  const handleLogin = async () => {
-    try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-    } catch (err) {
-      setError("Login failed. Please try again.");
     }
   };
 
@@ -488,41 +464,6 @@ function SmartNurseStation() {
       fetchVitalsHistory();
     }
   }, [currentPatient, view]);
-
-  const checkDrugInteractions = async (newMed: string) => {
-    if (!currentPatient) return;
-    setInteractionAlert(null);
-    
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Check for potential drug interactions between "${newMed}" and the patient's current medications: ${currentPatient.currentMedications.join(', ')}. 
-        Also consider their chronic conditions: ${currentPatient.chronicConditions.join(', ')}.
-        Return a JSON object with:
-        - severity: "high", "medium", "low", or "none"
-        - message: A brief, clear warning message if there's an interaction, otherwise null.`,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              severity: { type: Type.STRING },
-              message: { type: Type.STRING, nullable: true }
-            },
-            required: ["severity"]
-          }
-        }
-      });
-
-      const result = JSON.parse(response.text);
-      if (result.severity !== 'none') {
-        setInteractionAlert(result);
-      }
-    } catch (error) {
-      console.error("Error checking interactions:", error);
-    }
-  };
 
   const handleAdministerMedication = async (medData: any) => {
     if (!currentPatient || !user) return;
@@ -919,18 +860,7 @@ function SmartNurseStation() {
   }
 
   if (!user) {
-    return (
-      <div className="min-h-screen bg-white flex flex-col items-center justify-center p-6 text-center">
-        <div className="w-20 h-20 bg-blue-50 rounded-3xl flex items-center justify-center mb-8">
-          <ShieldAlert className="w-10 h-10 text-blue-600" />
-        </div>
-        <h1 className="text-3xl font-bold tracking-tight text-slate-900 mb-2 font-sans">Nurse Station</h1>
-        <p className="text-slate-500 mb-8 max-w-xs">Secure access to patient records and HIMS management.</p>
-        <Button onClick={handleLogin} className="w-full max-w-xs py-4 text-lg">
-          Sign in with Google
-        </Button>
-      </div>
-    );
+    return <Auth onAuthSuccess={() => {}} />;
   }
 
   return (
@@ -1926,14 +1856,9 @@ function SmartNurseStation() {
                       <Pill className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                       <input 
                         name="medicationName" 
-                        type="text" 
-                        required 
+                        type="text"
+                        required
                         defaultValue={selectedSchedule?.medicationName || scannedId || ''}
-                        onChange={(e) => {
-                          if (e.target.value.length > 3) {
-                            checkDrugInteractions(e.target.value);
-                          }
-                        }}
                         className="w-full bg-slate-50 border-none rounded-xl pl-11 pr-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
                         placeholder="e.g., Paracetamol" 
                       />
