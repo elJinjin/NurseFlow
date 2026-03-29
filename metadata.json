@@ -1,5 +1,5 @@
 {
-  "name": "Smart Nurse Station",
+  "name": "Smart Nurse Workflow Station",
   "description": "A mobile-first healthcare application for scanning patient QR codes, viewing medical records, and managing patient information in a HIMS-compliant environment.",
   "requestFramePermissions": ["camera"]
 }

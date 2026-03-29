@@ -5,6 +5,8 @@
 
 import React, { Component, useState, useEffect, useRef, useMemo } from 'react';
 import { Auth } from './Auth';
+import { Camera } from '@capacitor/camera';
+import { Capacitor } from '@capacitor/core';
 import { 
   QrCode, 
   User, 
@@ -37,6 +39,7 @@ import { Html5Qrcode } from 'html5-qrcode';
 import {
   signOut,
   onAuthStateChanged,
+  updateProfile,
   User as FirebaseUser
 } from 'firebase/auth';
 import { 
@@ -299,8 +302,11 @@ export default function App() {
 
 function SmartNurseStation() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [profileDisplayName, setProfileDisplayName] = useState<string>('');
+  const [profilePhotoURL, setProfilePhotoURL] = useState<string>('');
+  const [profileUpdating, setProfileUpdating] = useState<boolean>(false);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<'dashboard' | 'scanner' | 'details' | 'create' | 'edit' | 'search' | 'vitals' | 'medications' | 'administer' | 'profile' | 'add-schedule' | 'vitals-history' | 'nurse-dashboard'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'scanner' | 'details' | 'create' | 'edit' | 'search' | 'vitals' | 'medications' | 'administer' | 'profile' | 'add-schedule' | 'vitals-history' | 'nurse-dashboard' | 'meds-due'>('dashboard');
   const [scannedId, setScannedId] = useState<string | null>(null);
   const [currentPatient, setCurrentPatient] = useState<Patient | null>(null);
   const [medicationLogs, setMedicationLogs] = useState<MedicationLog[]>([]);
@@ -321,8 +327,10 @@ function SmartNurseStation() {
   const [searchQuery, setSearchQuery] = useState('');
   const [allPatients, setAllPatients] = useState<Patient[]>([]);
   const [totalMedsDue, setTotalMedsDue] = useState<number>(0);
+  const [patientMedsDueList, setPatientMedsDueList] = useState<{patient: Patient, overdueCount: number}[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
   const [patientNotes, setPatientNotes] = useState<ShiftNote[]>([]);
   const [newNoteText, setNewNoteText] = useState('');
 
@@ -333,6 +341,13 @@ function SmartNurseStation() {
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [editNoteText, setEditNoteText] = useState('');
   const scannerRef = useRef<Html5Qrcode | null>(null);
+  const [userRole, setUserRole] = useState<string>(() => {
+    try { return localStorage.getItem('nurseRole') || 'Registered Nurse'; } catch(e) { return 'Registered Nurse'; }
+  });
+  const [userShift, setUserShift] = useState<string>(() => {
+    try { return localStorage.getItem('nurseShift') || 'Day Shift'; } catch(e) { return 'Day Shift'; }
+  });
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
 
   // Auth check
   useEffect(() => {
@@ -343,14 +358,18 @@ function SmartNurseStation() {
     return () => unsubscribe();
   }, []);
 
+  // Sync local profile fields when auth user changes
+  useEffect(() => {
+    setProfileDisplayName(user?.displayName || '');
+    setProfilePhotoURL(user?.photoURL || '');
+  }, [user]);
+
   const updatePatientStatus = async (patientId: string, newStatus: 'Stable' | 'Critical' | 'Observation') => {
     try {
       const patientRef = doc(db, 'patients', patientId);
       await updateDoc(patientRef, { status: newStatus, updatedAt: serverTimestamp() });
-      setAllPatients(prev => prev.map(p => p.id === patientId ? { ...p, status: newStatus } : p));
-      if (currentPatient?.id === patientId) {
-        setCurrentPatient(prev => prev ? { ...prev, status: newStatus } : null);
-      }
+      // Merge partial update so UI lists, recent scans and details all refresh
+      mergeUpdatedPatient({ id: patientId, status: newStatus });
     } catch (err) {
       console.error("Error updating status:", err);
       setError("Failed to update patient status.");
@@ -392,26 +411,31 @@ function SmartNurseStation() {
       try {
         let count = 0;
         const now = new Date();
+        const dueList: {patient: Patient, overdueCount: number}[] = [];
         await Promise.all(allPatients.map(async (patient) => {
           const schedQ = query(collection(db, 'patients', patient.id, 'scheduledMedications'));
           const schedSnapshot = await getDocs(schedQ);
+          let patientOverdue = 0;
           schedSnapshot.forEach(doc => {
             const data = doc.data();
             if (data.nextDue) {
               const nextDueDate = safeToDate(data.nextDue);
               if (nextDueDate < now) {
                 count++;
+                patientOverdue++;
               }
             }
           });
+          if (patientOverdue > 0) dueList.push({ patient, overdueCount: patientOverdue });
         }));
         setTotalMedsDue(count);
+        setPatientMedsDueList(dueList);
       } catch (error) {
         console.error("Error fetching total meds due:", error);
       }
     };
     
-    if (view === 'nurse-dashboard') {
+    if (view === 'nurse-dashboard' || view === 'meds-due') {
       fetchTotalMedsDue();
     }
   }, [allPatients, view]);
@@ -500,10 +524,12 @@ function SmartNurseStation() {
         await updateDoc(patientRef, {
           currentMedications: arrayUnion(medData.medicationName)
         });
-        setCurrentPatient({
+        const updatedPatient = {
           ...currentPatient,
           currentMedications: [...currentPatient.currentMedications, medData.medicationName]
-        });
+        } as Patient;
+        setCurrentPatient(updatedPatient);
+        mergeUpdatedPatient(updatedPatient);
       }
       
       // If it was a scheduled med, update the nextDue time based on frequency
@@ -573,10 +599,12 @@ function SmartNurseStation() {
         await updateDoc(patientRef, {
           currentMedications: arrayUnion(schedData.medicationName)
         });
-        setCurrentPatient({
+        const updatedPatient = {
           ...currentPatient,
           currentMedications: [...currentPatient.currentMedications, schedData.medicationName]
-        });
+        } as Patient;
+        setCurrentPatient(updatedPatient);
+        mergeUpdatedPatient(updatedPatient);
       }
 
       setSelectedSchedule(null);
@@ -679,14 +707,13 @@ function SmartNurseStation() {
       const historyRef = doc(collection(db, 'patients', currentPatient.id, 'vitals'));
       await setDoc(historyRef, updatedVitals);
       
-      // Update local state
+      // Update local state and merge so all views refresh
       const updatedPatient = {
         ...currentPatient,
         lastVitals: updatedVitals,
-      };
+      } as Patient;
       setCurrentPatient(updatedPatient);
-      setAllPatients(prev => prev.map(p => p.id === updatedPatient.id ? updatedPatient : p));
-      setRecentScans(prev => prev.map(s => s.patient.id === updatedPatient.id ? { ...s, patient: updatedPatient } : s));
+      mergeUpdatedPatient(updatedPatient);
       
       setView('details');
     } catch (err) {
@@ -697,11 +724,13 @@ function SmartNurseStation() {
   };
 
   const startScanner = () => {
+    setCameraReady(false);
     setView('scanner');
     setIsScanning(true);
   };
 
   const stopScanner = () => {
+    setCameraReady(false);
     if (scannerRef.current && scannerRef.current.isScanning) {
       scannerRef.current.stop().then(() => {
         scannerRef.current?.clear();
@@ -716,8 +745,29 @@ function SmartNurseStation() {
   useEffect(() => {
     let html5QrCode: Html5Qrcode | null = null;
 
+    const requestCameraPermission = async () => {
+      if (Capacitor.isNativePlatform()) {
+        try {
+          const permission = await Camera.requestPermissions();
+          if (permission.camera !== 'granted') {
+            alert('Camera permission is required to scan QR codes');
+            setIsScanning(false);
+            return false;
+          }
+          return true;
+        } catch (err) {
+          console.error('Camera permission error:', err);
+          return false;
+        }
+      }
+      return true;
+    };
+
     if (view === 'scanner' && isScanning) {
-      const timer = setTimeout(() => {
+      const timer = setTimeout(async () => {
+        const hasPermission = await requestCameraPermission();
+        if (!hasPermission) return;
+
         const element = document.getElementById("reader");
         if (element) {
           html5QrCode = new Html5Qrcode("reader");
@@ -741,7 +791,9 @@ function SmartNurseStation() {
               handlePatientLookup(decodedText);
             },
             () => {}
-          ).catch(err => {
+          ).then(() => {
+            setCameraReady(true);
+          }).catch(err => {
             console.error("Scanner start error:", err);
             setError("Camera access denied or error.");
             setIsScanning(false);
@@ -769,17 +821,22 @@ function SmartNurseStation() {
       const docRef = doc(db, 'patients', id);
       const docSnap = await getDoc(docRef);
       if (docSnap.exists()) {
-        const patientData = docSnap.data() as Patient;
+        const raw = docSnap.data() as any;
+        const patientData: Patient = { id: docSnap.id, ...raw } as Patient;
         setCurrentPatient(patientData);
-        
+
         // Update recent scans
         setRecentScans(prev => {
           const filtered = prev.filter(s => s.patient.id !== patientData.id);
-          return [{ patient: patientData, scannedAt: Date.now() }, ...filtered].slice(0, 4);
+          return [{ patient: patientData, scannedAt: Date.now() }, ...filtered];
         });
-        
+
+        // Ensure local lists reflect this patient
+        mergeUpdatedPatient(patientData);
+
         setView('details');
       } else {
+        setCurrentPatient(null);
         setView('create');
       }
     } catch (err) {
@@ -789,10 +846,32 @@ function SmartNurseStation() {
     }
   };
 
+  // Merge updated or new patient into local app state so changes reflect everywhere
+  const mergeUpdatedPatient = (updated: Partial<Patient> & { id: string }) => {
+    console.debug('[mergeUpdatedPatient] merging patient', updated.id, updated);
+    setAllPatients(prev => {
+      const exists = prev.some(p => p.id === updated.id);
+      if (exists) {
+        return prev.map(p => p.id === updated.id ? { ...p, ...(updated as Partial<Patient>) } as Patient : p);
+      }
+      // Prepend new patients so they're visible immediately
+      return [{ id: updated.id, ...(updated as Partial<Patient>) } as Patient, ...prev];
+    });
+
+    setCurrentPatient(prev => {
+      if (prev?.id === updated.id) {
+        return { ...(prev as Patient), ...(updated as Partial<Patient>) } as Patient;
+      }
+      return prev;
+    });
+
+    setRecentScans(prev => prev.map(s => s.patient.id === updated.id ? { ...s, patient: { ...s.patient, ...(updated as Partial<Patient>) } } : s));
+  };
+
   const fetchAllPatients = async () => {
     try {
       const querySnapshot = await getDocs(collection(db, 'patients'));
-      const patients = querySnapshot.docs.map(doc => doc.data() as Patient);
+      const patients = querySnapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Patient));
       setAllPatients(patients);
     } catch (err) {
       console.error("Error fetching patients:", err);
@@ -800,15 +879,34 @@ function SmartNurseStation() {
   };
 
   useEffect(() => {
-    if (view === 'search') {
+    if (view === 'search' || view === 'nurse-dashboard') {
       fetchAllPatients();
     }
   }, [view]);
 
+  const handleSaveProfile = async () => {
+    if (!user) return;
+    setProfileUpdating(true);
+    try {
+      if (profileDisplayName !== (user.displayName || '')) {
+        await updateProfile(user, { displayName: profileDisplayName || undefined });
+        setUser(auth.currentUser);
+      }
+      try { localStorage.setItem('nurseRole', userRole); } catch(e) {}
+      try { localStorage.setItem('nurseShift', userShift); } catch(e) {}
+      setIsEditingProfile(false);
+    } catch (err) {
+      setError('Profile update failed: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setProfileUpdating(false);
+    }
+  };
+
   const handleCreatePatient = async (patientData: Partial<Patient>) => {
-    if (!scannedId) return;
+    const targetId = (view === 'edit' && currentPatient) ? currentPatient.id : scannedId;
+    if (!targetId) return;
     setLoading(true);
-    const path = `patients/${scannedId}`;
+    const path = `patients/${targetId}`;
     try {
       if (view === 'edit' && currentPatient) {
         const updatedData = {
@@ -823,11 +921,13 @@ function SmartNurseStation() {
           emergencyContact: patientData.emergencyContact || { name: '', relationship: '', phone: '' },
           updatedAt: serverTimestamp(),
         };
-        await updateDoc(doc(db, 'patients', scannedId), updatedData);
-        setCurrentPatient({ ...currentPatient, ...updatedData, updatedAt: new Date() } as Patient);
+        await updateDoc(doc(db, 'patients', targetId), updatedData);
+        const updatedPatient = { ...currentPatient, ...updatedData, updatedAt: new Date() } as Patient;
+        setCurrentPatient(updatedPatient);
+        mergeUpdatedPatient(updatedPatient);
       } else {
         const newPatient: Patient = {
-          id: scannedId,
+          id: targetId,
           fullName: patientData.fullName || '',
           dateOfBirth: patientData.dateOfBirth || '',
           gender: patientData.gender || 'Other',
@@ -840,8 +940,9 @@ function SmartNurseStation() {
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         };
-        await setDoc(doc(db, 'patients', scannedId), newPatient);
+        await setDoc(doc(db, 'patients', targetId), newPatient);
         setCurrentPatient(newPatient);
+        mergeUpdatedPatient(newPatient);
       }
       setView('details');
     } catch (err) {
@@ -872,13 +973,10 @@ function SmartNurseStation() {
             <Activity className="w-6 h-6" />
           </div>
           <div>
-            <h2 className="font-bold text-slate-900 leading-none">Smart Nurse</h2>
+            <h2 className="font-bold text-slate-900 leading-none">Smart Nurse Workflow</h2>
             <span className="text-[10px] text-slate-400 font-medium uppercase tracking-widest">Station Alpha</span>
           </div>
         </div>
-        <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-red-500 transition-colors">
-          <LogOut className="w-5 h-5" />
-        </button>
       </header>
 
       <main className="p-6 max-w-lg mx-auto">
@@ -946,33 +1044,6 @@ function SmartNurseStation() {
                 </Card>
               </div>
 
-              {todayScans.length > 0 && (
-                <div className="space-y-4">
-                  <h4 className="font-bold text-slate-400 text-xs uppercase tracking-widest px-1">Recently Scanned</h4>
-                  <div className="space-y-3">
-                    {todayScans.map(({ patient }) => (
-                      <Card 
-                        key={patient.id} 
-                        onClick={() => { setCurrentPatient(patient); setView('details'); }}
-                        className="p-4 flex items-center justify-between bg-white border-none shadow-sm cursor-pointer hover:ring-2 hover:ring-blue-100 transition-all"
-                      >
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 bg-slate-100 rounded-xl flex items-center justify-center text-slate-600">
-                            <User className="w-5 h-5" />
-                          </div>
-                          <div>
-                            <div className="font-bold text-sm text-slate-900">{patient.fullName}</div>
-                            <div className="text-[10px] text-slate-400 uppercase font-bold tracking-tighter">
-                              {patient.id} {patient.room && `• Room ${patient.room}`}
-                            </div>
-                          </div>
-                        </div>
-                        <ChevronRight className="w-4 h-4 text-slate-300" />
-                      </Card>
-                    ))}
-                  </div>
-                </div>
-              )}
             </motion.div>
           )}
 
@@ -993,6 +1064,12 @@ function SmartNurseStation() {
               </div>
               <div className="flex-1 flex items-center justify-center relative">
                 <div id="reader" className="w-full max-w-sm overflow-hidden rounded-3xl border-2 border-blue-500/50 min-h-[300px] bg-slate-900/50" />
+                {!cameraReady && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-black z-10 gap-3">
+                    <Activity className="w-8 h-8 text-white/50 animate-pulse" />
+                    <span className="text-white/40 text-xs font-medium">Starting camera...</span>
+                  </div>
+                )}
                 <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
                   <div className="w-64 h-64 border-2 border-white/20 rounded-3xl" />
                 </div>
@@ -1048,7 +1125,7 @@ function SmartNurseStation() {
                 <div className="space-y-4">
                   <h4 className="font-bold text-slate-400 text-[10px] uppercase tracking-widest px-1">Recently Scanned</h4>
                   <div className="grid grid-cols-2 gap-3">
-                    {todayScans.map(({ patient }) => (
+                    {todayScans.slice(0, 1).map(({ patient }) => (
                       <Card 
                         key={patient.id} 
                         onClick={() => { setCurrentPatient(patient); setView('details'); }}
@@ -1077,6 +1154,7 @@ function SmartNurseStation() {
                       p.fullName.toLowerCase().includes(searchQuery.toLowerCase()) || 
                       p.id.toLowerCase().includes(searchQuery.toLowerCase())
                     )
+                    .sort((a, b) => a.fullName.localeCompare(b.fullName))
                     .map(patient => (
                       <Card 
                         key={patient.id} 
@@ -1127,7 +1205,7 @@ function SmartNurseStation() {
                   <div className="text-blue-600 font-bold text-lg">{allPatients.length}</div>
                   <div className="text-[8px] text-slate-400 uppercase font-bold tracking-widest">Patients</div>
                 </Card>
-                <Card className="p-3 flex flex-col items-center gap-1 bg-white border-none shadow-sm">
+                <Card className="p-3 flex flex-col items-center gap-1 bg-white border-none shadow-sm cursor-pointer hover:ring-2 hover:ring-orange-100 transition-all" onClick={() => setView('meds-due')}>
                   <div className="text-orange-600 font-bold text-lg">
                     {totalMedsDue}
                   </div>
@@ -1150,7 +1228,15 @@ function SmartNurseStation() {
                 <h4 className="font-bold text-slate-400 text-[10px] uppercase tracking-widest px-1">Patient Status</h4>
                 <div className="space-y-3">
                   {allPatients.length > 0 ? (
-                    allPatients.slice(0, 5).map(patient => (
+                    [...allPatients]
+                      .sort((a, b) => {
+                        const aNoVitals = !a.lastVitals?.heartRate;
+                        const bNoVitals = !b.lastVitals?.heartRate;
+                        if (aNoVitals && !bNoVitals) return -1;
+                        if (!aNoVitals && bNoVitals) return 1;
+                        return 0;
+                      })
+                      .map(patient => (
                       <Card 
                         key={patient.id} 
                         className="p-4 bg-white border-none shadow-sm flex flex-col gap-3 cursor-pointer hover:ring-2 hover:ring-blue-100 transition-all"
@@ -1213,6 +1299,59 @@ function SmartNurseStation() {
             </motion.div>
           )}
 
+          {view === 'meds-due' && (
+            <motion.div
+              key="meds-due"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="space-y-6 pb-12"
+            >
+              <div className="flex items-center gap-4 mb-2">
+                <Button onClick={() => setView('nurse-dashboard')} variant="ghost" className="p-2 rounded-full bg-white shadow-sm">
+                  <ChevronLeft className="w-6 h-6" />
+                </Button>
+                <h3 className="text-xl font-bold">Medications Due</h3>
+              </div>
+
+              {patientMedsDueList.length > 0 ? (
+                <div className="space-y-3">
+                  {patientMedsDueList.map(({ patient, overdueCount }) => (
+                    <Card
+                      key={patient.id}
+                      onClick={() => { setCurrentPatient(patient); setView('medications'); }}
+                      className="p-4 bg-white border-none shadow-sm cursor-pointer hover:ring-2 hover:ring-orange-100 transition-all"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 bg-orange-50 rounded-xl flex items-center justify-center text-orange-600">
+                            <User className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <div className="font-bold text-sm text-slate-900">{patient.fullName}</div>
+                            <div className="text-[10px] text-slate-400 uppercase font-bold tracking-tighter">
+                              {patient.id}{patient.room && ` • Room ${patient.room}`}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Badge variant="danger">{overdueCount} Due</Badge>
+                          <ChevronRight className="w-4 h-4 text-slate-300" />
+                        </div>
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              ) : (
+                <Card className="p-8 text-center bg-white border-none shadow-sm">
+                  <CheckCircle2 className="w-12 h-12 text-green-400 mx-auto mb-3" />
+                  <p className="text-slate-500 font-medium">No overdue medications</p>
+                  <p className="text-xs text-slate-400 mt-1">All medications are on schedule</p>
+                </Card>
+              )}
+            </motion.div>
+          )}
+
           {view === 'details' && currentPatient && (
             <motion.div
               key="details"
@@ -1228,7 +1367,7 @@ function SmartNurseStation() {
                   </Button>
                   <h3 className="text-xl font-bold">Patient Profile</h3>
                 </div>
-                <Button onClick={() => setView('edit')} variant="outline" className="rounded-full px-6 border-blue-100 text-blue-600 hover:bg-blue-50">
+                <Button onClick={() => { setScannedId(currentPatient.id); setView('edit'); }} variant="outline" className="rounded-full px-6 border-blue-100 text-blue-600 hover:bg-blue-50">
                   Edit Record
                 </Button>
               </div>
@@ -1429,6 +1568,23 @@ function SmartNurseStation() {
               <div className="space-y-4">
                 <h4 className="font-bold text-slate-400 text-[10px] uppercase tracking-widest px-1">Shift Notes</h4>
                 <Card className="p-5 bg-white border-none shadow-sm space-y-4">
+                  <div className="pb-4 border-b border-slate-100 space-y-3">
+                    <textarea 
+                      className="w-full text-sm text-slate-700 bg-slate-50 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none resize-none min-h-[80px] border-none"
+                      value={newNoteText}
+                      onChange={(e) => setNewNoteText(e.target.value)}
+                      placeholder="Add a new shift note..."
+                    />
+                    <Button 
+                      onClick={handleAddNote}
+                      disabled={!newNoteText.trim() || loading}
+                      className="w-full py-3 rounded-xl"
+                    >
+                      <Plus className="w-4 h-4 mr-2" />
+                      Add Note
+                    </Button>
+                  </div>
+
                   <div className="space-y-3">
                     {patientNotes.length > 0 ? (
                       patientNotes.map(note => (
@@ -1475,23 +1631,6 @@ function SmartNurseStation() {
                       <p className="text-xs text-slate-400 text-center py-4">No shift notes recorded.</p>
                     )}
                   </div>
-                  
-                  <div className="pt-4 border-t border-slate-100 space-y-3">
-                    <textarea 
-                      className="w-full text-sm text-slate-700 bg-slate-50 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none resize-none min-h-[80px] border-none"
-                      value={newNoteText}
-                      onChange={(e) => setNewNoteText(e.target.value)}
-                      placeholder="Add a new shift note..."
-                    />
-                    <Button 
-                      onClick={handleAddNote}
-                      disabled={!newNoteText.trim() || loading}
-                      className="w-full py-3 rounded-xl"
-                    >
-                      <Plus className="w-4 h-4 mr-2" />
-                      Add Note
-                    </Button>
-                  </div>
                 </Card>
               </div>
             </motion.div>
@@ -1510,6 +1649,29 @@ function SmartNurseStation() {
                   <ChevronLeft className="w-6 h-6" />
                 </Button>
                 <h3 className="text-xl font-bold">Medication Schedule</h3>
+              </div>
+
+              <div className="flex gap-3">
+                <Button 
+                  onClick={() => setView('add-schedule')}
+                  variant="outline" 
+                  className="flex-1 py-3 rounded-2xl border-dashed border-2 border-slate-200 text-slate-500 hover:bg-slate-50 text-xs bg-white"
+                >
+                  <Plus className="w-4 h-4 mr-1" />
+                  Add Maintenance
+                </Button>
+                <Button 
+                  onClick={() => {
+                    setSelectedSchedule(null);
+                    setScannedId('');
+                    setView('administer');
+                  }}
+                  variant="outline" 
+                  className="flex-1 py-3 rounded-2xl border-dashed border-2 border-slate-200 text-slate-500 hover:bg-slate-50 text-xs bg-white"
+                >
+                  <Plus className="w-4 h-4 mr-1" />
+                  Record One-Time Dose
+                </Button>
               </div>
 
               {/* Scheduled Medications */}
@@ -1628,31 +1790,6 @@ function SmartNurseStation() {
                 </div>
               </div>
 
-              {/* Sticky Footer Actions */}
-              <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/80 backdrop-blur-md border-t border-slate-100 z-50">
-                <div className="max-w-lg mx-auto flex gap-3">
-                  <Button 
-                    onClick={() => setView('add-schedule')}
-                    variant="outline" 
-                    className="flex-1 py-3 rounded-2xl border-dashed border-2 border-slate-200 text-slate-500 hover:bg-slate-50 text-xs bg-white"
-                  >
-                    <Plus className="w-4 h-4 mr-1" />
-                    Add Maintenance
-                  </Button>
-                  <Button 
-                    onClick={() => {
-                      setSelectedSchedule(null);
-                      setScannedId('');
-                      setView('administer');
-                    }}
-                    variant="outline" 
-                    className="flex-1 py-3 rounded-2xl border-dashed border-2 border-slate-200 text-slate-500 hover:bg-slate-50 text-xs bg-white"
-                  >
-                    <Plus className="w-4 h-4 mr-1" />
-                    Record One-Time Dose
-                  </Button>
-                </div>
-              </div>
             </motion.div>
           )}
 
@@ -1780,25 +1917,80 @@ function SmartNurseStation() {
                     <User className="w-12 h-12" />
                   )}
                 </div>
-                <h4 className="text-2xl font-bold text-slate-900">{user?.displayName || 'Nurse User'}</h4>
-                <p className="text-slate-500 font-medium mb-6">{user?.email}</p>
-                
-                <div className="grid grid-cols-2 gap-4 mb-8">
-                  <div className="bg-slate-50 p-4 rounded-2xl">
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Role</div>
-                    <div className="text-slate-900 font-bold">Registered Nurse</div>
-                  </div>
-                  <div className="bg-slate-50 p-4 rounded-2xl">
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Shift</div>
-                    <div className="text-slate-900 font-bold">Day Shift</div>
-                  </div>
-                </div>
 
-                <Button onClick={handleLogout} variant="danger" className="w-full py-4 rounded-2xl flex items-center justify-center gap-2">
-                  <LogOut className="w-5 h-5" />
-                  Sign Out
-                </Button>
+                {isEditingProfile ? (
+                  <div className="space-y-4 text-left mb-4">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-widest">Full Name</label>
+                      <input
+                        type="text"
+                        value={profileDisplayName}
+                        onChange={(e) => setProfileDisplayName(e.target.value)}
+                        className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                        placeholder="Your full name"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-widest">Role</label>
+                        <select
+                          value={userRole}
+                          onChange={(e) => setUserRole(e.target.value)}
+                          className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                        >
+                          <option>Registered Nurse</option>
+                          <option>Head Nurse</option>
+                          <option>Nurse Aide</option>
+                          <option>Charge Nurse</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-widest">Shift</label>
+                        <select
+                          value={userShift}
+                          onChange={(e) => setUserShift(e.target.value)}
+                          className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                        >
+                          <option>Day Shift</option>
+                          <option>Evening Shift</option>
+                          <option>Night Shift</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="flex gap-3">
+                      <Button onClick={() => setIsEditingProfile(false)} variant="outline" className="flex-1 py-3">Cancel</Button>
+                      <Button onClick={handleSaveProfile} disabled={profileUpdating} className="flex-1 py-3">
+                        {profileUpdating ? 'Saving...' : 'Save'}
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <h4 className="text-2xl font-bold text-slate-900">{user?.displayName || 'Nurse User'}</h4>
+                    <p className="text-slate-500 font-medium mb-4">{user?.email}</p>
+                    <div className="grid grid-cols-2 gap-4 mb-4">
+                      <div className="bg-slate-50 p-4 rounded-2xl">
+                        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Role</div>
+                        <div className="text-slate-900 font-bold">{userRole}</div>
+                      </div>
+                      <div className="bg-slate-50 p-4 rounded-2xl">
+                        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Shift</div>
+                        <div className="text-slate-900 font-bold">{userShift}</div>
+                      </div>
+                    </div>
+                    <Button
+                      onClick={() => { setProfileDisplayName(user?.displayName || ''); setIsEditingProfile(true); }}
+                      variant="outline"
+                      className="w-full mb-3 py-3 rounded-2xl"
+                    >
+                      <Edit2 className="w-4 h-4 mr-2" />
+                      Edit Profile
+                    </Button>
+                  </>
+                )}
+
               </Card>
+
 
               <div className="space-y-4">
                 <h4 className="font-bold text-slate-400 text-[10px] uppercase tracking-widest px-1">System Info</h4>
@@ -1809,7 +2001,7 @@ function SmartNurseStation() {
                   </div>
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-slate-500">Last Sync</span>
-                    <span className="font-bold text-slate-900">{format(new Date(), 'HH:mm')}</span>
+                    <span className="font-bold text-slate-900">{format(new Date(), 'h:mm a')}</span>
                   </div>
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-slate-500">Status</span>
@@ -1817,6 +2009,11 @@ function SmartNurseStation() {
                   </div>
                 </Card>
               </div>
+
+              <Button onClick={handleLogout} variant="danger" className="w-full py-4 rounded-2xl flex items-center justify-center gap-2">
+                <LogOut className="w-5 h-5" />
+                Sign Out
+              </Button>
             </motion.div>
           )}
 
@@ -2169,8 +2366,8 @@ function SmartNurseStation() {
                       <label className="block text-xs font-bold text-slate-500 mb-1">Full Name</label>
                       <input name="fullName" required defaultValue={currentPatient?.fullName} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none" placeholder="John Doe" />
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
+                    <div className="grid grid-cols-3 gap-4">
+                      <div className="col-span-2">
                         <label className="block text-xs font-bold text-slate-500 mb-1">Date of Birth</label>
                         <input name="dob" type="date" required defaultValue={currentPatient?.dateOfBirth} className="w-full bg-slate-50 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
                       </div>

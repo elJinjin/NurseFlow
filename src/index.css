@@ -1,1 +1,29 @@
 @import "tailwindcss";
+
+/* ── QR Scanner: suppress native video-player chrome ── */
+#reader {
+  position: relative;
+  background: transparent !important;
+  border: none !important;
+}
+#reader video {
+  display: block !important;
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  border-radius: 1.5rem;
+}
+/* Hide browser-default video controls / empty-player overlay */
+#reader video::-webkit-media-controls,
+#reader video::-webkit-media-controls-enclosure,
+#reader video::-webkit-media-controls-panel {
+  display: none !important;
+}
+/* Hide html5-qrcode dashboard (file upload / camera-select UI) */
+#reader__dashboard {
+  display: none !important;
+}
+#reader__scan_region {
+  border: none !important;
+  background: transparent !important;
+}

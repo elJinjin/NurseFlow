@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Smart Nurse Workflow</string>
+    <string name="title_activity_main">Smart Nurse Workflow</string>
+    <string name="package_name">com.nurseflow</string>
+    <string name="custom_url_scheme">com.nurseflow</string>
+</resources>
